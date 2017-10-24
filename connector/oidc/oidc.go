@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"encoding/json"
 
 	"github.com/coreos/go-oidc"
 	"github.com/sirupsen/logrus"
@@ -16,6 +17,11 @@ import (
 
 	"github.com/coreos/dex/connector"
 )
+
+type connectorData struct {
+	// Store token, even if it eventually expires
+	AccessToken string `json:"accessToken"`
+}
 
 // Config holds configuration options for OpenID Connect logins.
 type Config struct {
@@ -215,6 +221,15 @@ func (c *oidcConnector) HandleCallback(s connector.Scopes, r *http.Request) (ide
 		Email:         claims.Email,
 		EmailVerified: claims.EmailVerified,
 	}
+
+	// Add AccessToken to user identity for future requests
+	data := connectorData{AccessToken: token.AccessToken}
+	connData, err := json.Marshal(data)
+	if err != nil {
+		return identity, fmt.Errorf("marshal connector data: %v", err)
+	}
+	identity.ConnectorData = connData
+
 	return identity, nil
 }
 

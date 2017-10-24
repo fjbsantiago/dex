@@ -95,6 +95,7 @@ type discovery struct {
 	Auth          string   `json:"authorization_endpoint"`
 	Token         string   `json:"token_endpoint"`
 	Keys          string   `json:"jwks_uri"`
+	UserInfo      string   `json:"userinfo_endpoint"`
 	ResponseTypes []string `json:"response_types_supported"`
 	Subjects      []string `json:"subject_types_supported"`
 	IDTokenAlgs   []string `json:"id_token_signing_alg_values_supported"`
@@ -109,6 +110,7 @@ func (s *Server) discoveryHandler() (http.HandlerFunc, error) {
 		Auth:        s.absURL("/auth"),
 		Token:       s.absURL("/token"),
 		Keys:        s.absURL("/keys"),
+		UserInfo:    s.absURL("/userinfo"),
 		Subjects:    []string{"public"},
 		IDTokenAlgs: []string{string(jose.RS256)},
 		Scopes:      []string{"openid", "email", "groups", "profile", "offline_access"},
@@ -650,7 +652,17 @@ func (s *Server) handleAuthCode(w http.ResponseWriter, r *http.Request, client s
 		return
 	}
 
-	accessToken := storage.NewID()
+	// Extract Access Token that was stored while the connector handled the OIDC handshake
+	connData := map[string]string{}
+
+	if err := json.Unmarshal(authCode.ConnectorData, &connData); err != nil {
+		s.logger.Errorf("Failed to read connector data : %v", err)
+		return 
+	}
+
+	// Use the stored access token instead of generating a random new one
+	accessToken := connData["accessToken"]
+	
 	idToken, expiry, err := s.newIDToken(client.ID, authCode.Claims, authCode.Scopes, authCode.Nonce, accessToken, authCode.ConnectorID)
 	if err != nil {
 		s.logger.Errorf("failed to create ID token: %v", err)
@@ -978,6 +990,53 @@ func (s *Server) writeAccessToken(w http.ResponseWriter, idToken, accessToken, r
 		idToken,
 	}
 	data, err := json.Marshal(resp)
+	if err != nil {
+		s.logger.Errorf("failed to marshal access token response: %v", err)
+		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Write(data)
+}
+
+// Request userinfo data from the original IdP on behalf of the Relying Party (client)
+func (s *Server) handleUserInfo(w http.ResponseWriter, r *http.Request) {
+	
+	user := s.getUserInfo(r.Header.Get("Authorization"))
+
+	s.writeUserInfo(w, user)
+}
+
+func (s *Server) getUserInfo(authorization string) map[string]interface{} {
+	// Prepare get request including Authorization header from RP
+	req, err := http.NewRequest("GET", "https://oidc.connect.surfconext.nl/userinfo", nil)
+
+	if err != nil {
+		fmt.Errorf("Error Creating GET request: %v", err)
+	}
+
+	req.Header.Add("Accept", `application/json`)
+	req.Header.Add("Content-Type", `application/json`)
+	req.Header.Add("Authorization", authorization)
+
+	// Prepare http client to execute get request
+	client := &http.Client{}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Errorf("Error Executing GET request: %v", err)
+	}
+
+	user := map[string]interface{}{}
+	json.NewDecoder(resp.Body).Decode(&user)
+
+	return user
+}
+
+func (s *Server) writeUserInfo(w http.ResponseWriter, user map[string]interface{}) {
+
+	data, err := json.Marshal(user)
 	if err != nil {
 		s.logger.Errorf("failed to marshal access token response: %v", err)
 		s.tokenErrHelper(w, errServerError, "", http.StatusInternalServerError)
